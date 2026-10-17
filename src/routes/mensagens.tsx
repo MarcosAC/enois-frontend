@@ -17,10 +17,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
 import { AppContainer } from "@/components/app-container";
-import { useToast } from "@/components/ui/toast";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { UserAvatar } from "@/components/user-avatar";
-import { UserBadge } from "@/components/user-badge";
 
 export const Route = createFileRoute("/mensagens")({
   beforeLoad: requireAuth,
@@ -36,15 +33,11 @@ function Mensagens() {
   const { conversation } = Route.useSearch();
   const currentUserId = getCurrentUserId();
   const queryClient = useQueryClient();
-  const { toast } = useToast();
   const [activeId, setActiveId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [text, setText] = useState("");
   const [showSearch, setShowSearch] = useState(false);
   const [inboxTab, setInboxTab] = useState<"all" | "jobs" | "people">("all");
-  const [selecting, setSelecting] = useState(false);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [confirmDelete, setConfirmDelete] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Veio de um link/perfil com uma conversa: abre ela direto.
@@ -69,9 +62,11 @@ function Mensagens() {
 
   const conversations = conversationsData?.pages.flatMap((page) => page.items) ?? [];
   // Separa a caixa de entrada: conversas de vaga (candidatura) x conversas com pessoas.
-  const visibleConversations = conversations.filter((c) =>
-    inboxTab === "all" ? true : inboxTab === "jobs" ? c.kind === "JOB" : c.kind !== "JOB",
-  );
+  const visibleConversations = conversations
+    .filter((c) =>
+      inboxTab === "all" ? true : inboxTab === "jobs" ? c.kind === "JOB" : c.kind !== "JOB",
+    )
+    .sort((a, b) => (Date.parse(b.time ?? "") || 0) - (Date.parse(a.time ?? "") || 0));
   const activeConversation = activeId ? conversations.find((c) => c.id === activeId) : null;
 
   const {
@@ -103,7 +98,21 @@ function Mensagens() {
   const sendMessage = useMutation({
     mutationFn: ({ conversationId, text }: SendMessageInput) =>
       messagesApi.sendMessage(conversationId, text),
-    onSuccess: () => {
+    onSuccess: (message, { conversationId }) => {
+      queryClient.setQueryData<typeof conversationsData>(["conversations"], (current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          pages: current.pages.map((page) => ({
+            ...page,
+            items: page.items.map((item) =>
+              item.id === conversationId
+                ? { ...item, lastMessage: message.text, time: message.time }
+                : item,
+            ),
+          })),
+        };
+      });
       queryClient.invalidateQueries({ queryKey: ["messages", activeConversation?.id] });
       queryClient.invalidateQueries({ queryKey: ["conversations"] });
       setText("");
@@ -121,26 +130,6 @@ function Mensagens() {
     },
   });
 
-  const hideSelected = useMutation({
-    mutationFn: () => messagesApi.hideConversations(Array.from(selected)),
-    onSuccess: () => {
-      setConfirmDelete(false);
-      setSelecting(false);
-      setSelected(new Set());
-      toast(texts.messages.deleted);
-      queryClient.invalidateQueries({ queryKey: ["conversations"] });
-    },
-    onError: () => toast(texts.communities.actionError, "error"),
-  });
-
-  const toggleSelected = (id: string) =>
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-
   const markAsRead = useMutation({
     mutationFn: (conversationId: string) => messagesApi.markAsRead(conversationId),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["conversations"] }),
@@ -152,15 +141,6 @@ function Mensagens() {
     if (!content || !activeConversation) return;
     sendMessage.mutate({ conversationId: activeConversation.id, text: content });
   };
-
-  // Campo de mensagem cresce com o texto (teto 128px) e volta a 1 linha ao enviar.
-  const messageInputRef = useRef<HTMLTextAreaElement>(null);
-  useEffect(() => {
-    const el = messageInputRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 128)}px`;
-  }, [text]);
 
   const activeMessages = activeConversation ? messages : [];
 
@@ -195,27 +175,14 @@ function Mensagens() {
             <div className="flex items-center justify-between mb-3">
               <h1 className="text-lg font-semibold">{texts.messages.title}</h1>
 
-              <div className="flex gap-2">
-                {!selecting && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="rounded-full"
-                    onClick={() => setSelecting(true)}
-                  >
-                    {texts.messages.selectMode}
-                  </Button>
-                )}
-
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="rounded-full"
-                  onClick={() => setShowSearch(!showSearch)}
-                >
-                  {showSearch ? texts.messages.back : texts.messages.new}
-                </Button>
-              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                className="rounded-full"
+                onClick={() => setShowSearch(!showSearch)}
+              >
+                {showSearch ? texts.messages.back : texts.messages.new}
+              </Button>
             </div>
             {showSearch ? (
               <div className="space-y-3">
@@ -272,7 +239,7 @@ function Mensagens() {
                 key={tab}
                 type="button"
                 onClick={() => setInboxTab(tab)}
-                className={`rounded-full px-3 py-1 text-xs font-normal transition ${
+                className={`rounded-full px-3 py-1 text-[12px] font-light transition ${
                   inboxTab === tab
                     ? "bg-primary-soft text-primary"
                     : "text-text-subtle hover:bg-surface-2"
@@ -282,50 +249,6 @@ function Mensagens() {
               </button>
             ))}
           </div>
-
-          {selecting && (
-            <div className="flex flex-wrap items-center gap-2 border-b border-border bg-surface-2 px-3 py-2">
-              <button
-                type="button"
-                className="text-xs font-normal text-primary hover:underline"
-                onClick={() =>
-                  setSelected(
-                    selected.size === visibleConversations.length
-                      ? new Set()
-                      : new Set(visibleConversations.map((c) => c.id)),
-                  )
-                }
-              >
-                {selected.size === visibleConversations.length
-                  ? texts.messages.clearSelection
-                  : texts.messages.selectAll}
-              </button>
-
-              <div className="ml-auto flex items-center gap-2">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="rounded-full"
-                  onClick={() => {
-                    setSelecting(false);
-                    setSelected(new Set());
-                  }}
-                >
-                  {texts.messages.cancelSelection}
-                </Button>
-
-                <Button
-                  size="sm"
-                  variant="destructive"
-                  className="rounded-full"
-                  disabled={selected.size === 0 || hideSelected.isPending}
-                  onClick={() => setConfirmDelete(true)}
-                >
-                  {texts.messages.deleteSelected(selected.size)}
-                </Button>
-              </div>
-            </div>
-          )}
 
           <ul className="flex-1 overflow-y-auto overscroll-contain">
             {visibleConversations.length === 0 ? (
@@ -338,14 +261,7 @@ function Mensagens() {
                   key={c.id}
                   conversation={c}
                   isActive={c.id === (activeConversation?.id ?? "")}
-                  selecting={selecting}
-                  selected={selected.has(c.id)}
-                  onToggle={() => toggleSelected(c.id)}
                   onSelect={() => {
-                    if (selecting) {
-                      toggleSelected(c.id);
-                      return;
-                    }
                     setActiveId(c.id);
                     if (c.unread > 0) markAsRead.mutate(c.id);
                   }}
@@ -417,18 +333,11 @@ function Mensagens() {
                               to="/perfil/$username"
                               params={{ username: otherUser?.username ?? otherParticipantId ?? "" }}
                             >
-                              <span className="relative mb-1 inline-block">
-                                <UserAvatar
-                                  src={otherUser?.avatar}
-                                  alt={otherUser?.name}
-                                  className="h-7 w-7 shrink-0"
-                                />
-
-                                <UserBadge
-                                  badge={otherUser?.badge}
-                                  className="absolute -bottom-0.5 -right-0.5 h-3 w-3 ring-1 ring-card"
-                                />
-                              </span>
+                              <UserAvatar
+                                src={otherUser?.avatar}
+                                alt={otherUser?.name}
+                                className="h-7 w-7 shrink-0 mb-1"
+                              />
                             </Link>
                           )}
                           <div
@@ -441,7 +350,7 @@ function Mensagens() {
                             <p className="break-words">{m.text}</p>
 
                             <p
-                              className={`mt-1 text-xs ${isMe ? "text-primary-foreground/70" : "text-muted-foreground"}`}
+                              className={`mt-1 text-[10px] ${isMe ? "text-primary-foreground/70" : "text-muted-foreground"}`}
                             >
                               {formatTime(m.time)}
                             </p>
@@ -456,22 +365,13 @@ function Mensagens() {
 
               <form
                 onSubmit={handleSubmit}
-                className="flex items-end gap-2 border-t border-border p-3"
+                className="flex items-center gap-2 border-t border-border p-3"
               >
-                <textarea
+                <Input
                   value={text}
                   onChange={(e) => setText(e.target.value)}
-                  onKeyDown={(e) => {
-                    // Enter envia; Shift+Enter quebra linha (padrao de chat).
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSubmit(e as unknown as React.FormEvent<HTMLFormElement>);
-                    }
-                  }}
-                  ref={messageInputRef}
-                  rows={1}
                   placeholder={texts.messages.inputPlaceholder}
-                  className="max-h-32 min-h-[40px] w-full resize-none rounded-2xl bg-muted px-4 py-2.5 text-sm outline-none"
+                  className="h-10 rounded-full bg-muted"
                 />
 
                 <button
@@ -486,22 +386,11 @@ function Mensagens() {
           )}
         </div>
       </div>
-
-      <ConfirmDialog
-        open={confirmDelete}
-        onOpenChange={setConfirmDelete}
-        title={texts.messages.deleteTitle}
-        description={texts.messages.deleteDescription}
-        confirmLabel={texts.messages.deleteConfirm}
-        destructive
-        pending={hideSelected.isPending}
-        onConfirm={() => hideSelected.mutate()}
-      />
     </AppContainer>
   );
 }
 
-function ConversationItem({ conversation, isActive, onSelect, selecting, selected, onToggle }: ConversationItemProps) {
+function ConversationItem({ conversation, isActive, onSelect }: ConversationItemProps) {
   const currentUserId = getCurrentUserId();
   const otherId = conversation.participantIds.find((id) => id !== currentUserId);
   const { data: otherUser } = useQuery({
@@ -517,32 +406,18 @@ function ConversationItem({ conversation, isActive, onSelect, selecting, selecte
       <button
         onClick={onSelect}
         className={`flex w-full items-center gap-3 px-4 py-3 text-left transition ${
-          selected ? "bg-primary-soft" : isActive ? "bg-primary-soft" : "hover:bg-muted"
+          isActive ? "bg-primary-soft" : "hover:bg-muted"
         }`}
       >
-        {selecting && (
-          <span
-            aria-hidden
-            className={`grid h-5 w-5 shrink-0 place-items-center rounded-full border ${
-              selected ? "border-primary bg-primary text-primary-foreground" : "border-border-soft"
-            }`}
-          >
-            {selected ? "✓" : ""}
-          </span>
-        )}
         <Link to="/perfil/$username" params={{ username: otherUser?.username ?? otherId ?? "" }}>
           <UserAvatar src={otherUser?.avatar} alt={title} className="h-11 w-11 shrink-0" />
         </Link>
 
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between">
-            <span className="flex min-w-0 items-center gap-1.5">
-              <span className="truncate text-sm font-medium">{title}</span>
+            <span className="truncate text-sm font-medium">{title}</span>
 
-              <UserBadge badge={otherUser?.badge} />
-            </span>
-
-            <span className="text-xs text-muted-foreground shrink-0 ml-2">
+            <span className="text-[11px] text-muted-foreground shrink-0 ml-2">
               {conversation.time ? formatTime(conversation.time) : ""}
             </span>
           </div>
@@ -552,7 +427,7 @@ function ConversationItem({ conversation, isActive, onSelect, selecting, selecte
               {conversation.lastMessage ?? ""}
             </p>
             {conversation.unread > 0 && (
-              <span className="grid h-5 min-w-5 shrink-0 place-items-center rounded-full bg-primary px-1.5 text-xs font-semibold text-primary-foreground">
+              <span className="grid h-5 min-w-5 shrink-0 place-items-center rounded-full bg-primary px-1.5 text-[10px] font-semibold text-primary-foreground">
                 {conversation.unread}
               </span>
             )}
@@ -590,11 +465,7 @@ function ConversationHeader({ conversation, onBack }: ConversationHeaderProps) {
         </Link>
 
         <div className="min-w-0">
-          <span className="flex items-center gap-1.5">
-            <span className="truncate font-semibold">{title}</span>
-
-            <UserBadge badge={otherUser?.badge} />
-          </span>
+          <p className="truncate font-semibold">{title}</p>
           {otherUser?.headline && (
             <p className="truncate text-xs text-muted-foreground">{otherUser.headline}</p>
           )}
