@@ -12,18 +12,12 @@ import { ArrowLeft, Search, Send } from "lucide-react";
 import { messagesApi, networkApi, profileApi } from "@/lib/api";
 import { getCurrentUserId } from "@/lib/current-user";
 import { requireAuth } from "@/lib/require-auth";
-import { insertSnippet } from "@/lib/rich-text/insert-snippet";
 
 import { Button } from "@/components/ui/button";
-import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { EmojiPicker } from "@/components/ui/emoji-picker";
 import { Input } from "@/components/ui/input";
-import { useToast } from "@/components/ui/toast";
 
 import { AppContainer } from "@/components/app-container";
-import { RichText } from "@/components/post/rich-text";
 import { UserAvatar } from "@/components/user-avatar";
-import { UserBadges } from "@/components/user-badge";
 
 export const Route = createFileRoute("/mensagens")({
   beforeLoad: requireAuth,
@@ -39,17 +33,11 @@ function Mensagens() {
   const { conversation } = Route.useSearch();
   const currentUserId = getCurrentUserId();
   const queryClient = useQueryClient();
-  const { toast } = useToast();
   const [activeId, setActiveId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [text, setText] = useState("");
   const [showSearch, setShowSearch] = useState(false);
-  const [inboxTab, setInboxTab] = useState<"all" | "jobs" | "people" | "archived">("all");
-  const [selecting, setSelecting] = useState(false);
-  const [selectingMessages, setSelectingMessages] = useState(false);
-  const [selectedMessages, setSelectedMessages] = useState<Set<string>>(new Set());
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [inboxTab, setInboxTab] = useState<"all" | "jobs" | "people">("all");
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Veio de um link/perfil com uma conversa: abre ela direto.
@@ -65,11 +53,8 @@ function Mensagens() {
     hasNextPage: hasMoreConversations,
     isFetchingNextPage: isLoadingMoreConversations,
   } = useInfiniteQuery({
-    queryKey: ["conversations", inboxTab === "archived" ? "archived" : "inbox"],
-    queryFn: ({ pageParam }) =>
-      inboxTab === "archived"
-        ? messagesApi.archivedConversations(pageParam)
-        : messagesApi.listConversations(pageParam),
+    queryKey: ["conversations"],
+    queryFn: ({ pageParam }) => messagesApi.listConversations(pageParam),
     initialPageParam: null as string | null,
     getNextPageParam: (last) => last.nextCursor ?? undefined,
     refetchInterval: 15_000,
@@ -77,15 +62,11 @@ function Mensagens() {
 
   const conversations = conversationsData?.pages.flatMap((page) => page.items) ?? [];
   // Separa a caixa de entrada: conversas de vaga (candidatura) x conversas com pessoas.
-  // Arquivadas não separa por tipo: é a lista de quem foi apagado "para mim", e ali a pessoa quer
-  // reencontrar o que sumiu, não filtrar.
-  const visibleConversations = conversations.filter((c) =>
-    inboxTab === "archived" || inboxTab === "all"
-      ? true
-      : inboxTab === "jobs"
-        ? c.kind === "JOB"
-        : c.kind !== "JOB",
-  );
+  const visibleConversations = conversations
+    .filter((c) =>
+      inboxTab === "all" ? true : inboxTab === "jobs" ? c.kind === "JOB" : c.kind !== "JOB",
+    )
+    .sort((a, b) => (Date.parse(b.time ?? "") || 0) - (Date.parse(a.time ?? "") || 0));
   const activeConversation = activeId ? conversations.find((c) => c.id === activeId) : null;
 
   const {
@@ -117,7 +98,21 @@ function Mensagens() {
   const sendMessage = useMutation({
     mutationFn: ({ conversationId, text }: SendMessageInput) =>
       messagesApi.sendMessage(conversationId, text),
-    onSuccess: () => {
+    onSuccess: (message, { conversationId }) => {
+      queryClient.setQueryData<typeof conversationsData>(["conversations"], (current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          pages: current.pages.map((page) => ({
+            ...page,
+            items: page.items.map((item) =>
+              item.id === conversationId
+                ? { ...item, lastMessage: message.text, time: message.time }
+                : item,
+            ),
+          })),
+        };
+      });
       queryClient.invalidateQueries({ queryKey: ["messages", activeConversation?.id] });
       queryClient.invalidateQueries({ queryKey: ["conversations"] });
       setText("");
@@ -135,50 +130,6 @@ function Mensagens() {
     },
   });
 
-  // Apagar MENSAGEM para mim: some só para quem apagou (o outro continua vendo na conversa dele).
-  const hideMessages = useMutation({
-    mutationFn: () =>
-      messagesApi.hideMessages(activeConversation!.id, Array.from(selectedMessages)),
-    onSuccess: () => {
-      setSelectedMessages(new Set());
-      setSelectingMessages(false);
-      queryClient.invalidateQueries({ queryKey: ["messages", activeConversation?.id] });
-      toast(texts.messages.messagesDeleted);
-    },
-    onError: () => toast(texts.messages.messagesDeleteError, "error"),
-  });
-
-  const restoreSelected = useMutation({
-    mutationFn: () => messagesApi.unhideConversations(Array.from(selected)),
-    onSuccess: () => {
-      setSelected(new Set());
-      setSelecting(false);
-      queryClient.invalidateQueries({ queryKey: ["conversations"] });
-      toast(texts.messages.restored);
-    },
-    onError: () => toast(texts.messages.restoreError, "error"),
-  });
-
-  const hideSelected = useMutation({
-    mutationFn: () => messagesApi.hideConversations(Array.from(selected)),
-    onSuccess: () => {
-      setConfirmDelete(false);
-      setSelecting(false);
-      setSelected(new Set());
-      toast(texts.messages.deleted);
-      queryClient.invalidateQueries({ queryKey: ["conversations"] });
-    },
-    onError: () => toast(texts.communities.actionError, "error"),
-  });
-
-  const toggleSelected = (id: string) =>
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-
   const markAsRead = useMutation({
     mutationFn: (conversationId: string) => messagesApi.markAsRead(conversationId),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["conversations"] }),
@@ -189,31 +140,6 @@ function Mensagens() {
     const content = text.trim();
     if (!content || !activeConversation) return;
     sendMessage.mutate({ conversationId: activeConversation.id, text: content });
-  };
-
-  // Campo de mensagem cresce com o texto (teto 128px) e volta a 1 linha ao enviar.
-  const messageInputRef = useRef<HTMLTextAreaElement>(null);
-  useEffect(() => {
-    const el = messageInputRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 128)}px`;
-  }, [text]);
-
-  /** Emoji do seletor: entra na posição do cursor (o campo é o mesmo, então vale para o chat). */
-  const insertEmoji = (emoji: string) => {
-    const el = messageInputRef.current;
-    const start = el?.selectionStart ?? text.length;
-    const end = el?.selectionEnd ?? start;
-    const result = insertSnippet(text, start, end, emoji);
-    setText(result.value);
-
-    requestAnimationFrame(() => {
-      const node = messageInputRef.current;
-      if (!node) return;
-      node.focus();
-      node.setSelectionRange(result.selectionStart, result.selectionEnd);
-    });
   };
 
   const activeMessages = activeConversation ? messages : [];
@@ -241,7 +167,7 @@ function Mensagens() {
     <AppContainer>
       {/* `dvh` nos dois tamanhos: `100vh` no desktop é o valor que não encolhe quando a barra
           do navegador aparece no celular, e aí o compositor ficava escondido atrás do teclado. */}
-      <div className="surface-card grid h-[calc(100dvh-11rem)] grid-cols-1 overflow-hidden md:h-[calc(100dvh-9rem)] md:grid-cols-[320px_minmax(0,1fr)]">
+      <div className="surface-card grid h-[calc(100dvh-11rem)] grid-cols-1 overflow-hidden md:h-[calc(100dvh-9rem)] md:grid-cols-[320px_1fr]">
         <div
           className={`flex min-h-0 flex-col border-r border-border ${activeConversation ? "hidden md:flex" : "flex"}`}
         >
@@ -249,27 +175,14 @@ function Mensagens() {
             <div className="flex items-center justify-between mb-3">
               <h1 className="text-lg font-semibold">{texts.messages.title}</h1>
 
-              <div className="flex gap-2">
-                {!selecting && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="rounded-full"
-                    onClick={() => setSelecting(true)}
-                  >
-                    {texts.messages.selectMode}
-                  </Button>
-                )}
-
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="rounded-full"
-                  onClick={() => setShowSearch(!showSearch)}
-                >
-                  {showSearch ? texts.messages.back : texts.messages.new}
-                </Button>
-              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                className="rounded-full"
+                onClick={() => setShowSearch(!showSearch)}
+              >
+                {showSearch ? texts.messages.back : texts.messages.new}
+              </Button>
             </div>
             {showSearch ? (
               <div className="space-y-3">
@@ -321,12 +234,12 @@ function Mensagens() {
           </div>
 
           <div className="flex gap-1 border-b border-border px-3 pb-2">
-            {(["all", "jobs", "people", "archived"] as const).map((tab) => (
+            {(["all", "jobs", "people"] as const).map((tab) => (
               <button
                 key={tab}
                 type="button"
                 onClick={() => setInboxTab(tab)}
-                className={`rounded-full px-3 py-1 text-xs font-normal transition ${
+                className={`rounded-full px-3 py-1 text-[12px] font-light transition ${
                   inboxTab === tab
                     ? "bg-primary-soft text-primary"
                     : "text-text-subtle hover:bg-surface-2"
@@ -337,67 +250,10 @@ function Mensagens() {
             ))}
           </div>
 
-          {selecting && (
-            <div className="flex flex-wrap items-center gap-2 border-b border-border bg-surface-2 px-3 py-2">
-              <button
-                type="button"
-                className="text-xs font-normal text-primary hover:underline"
-                onClick={() =>
-                  setSelected(
-                    selected.size === visibleConversations.length
-                      ? new Set()
-                      : new Set(visibleConversations.map((c) => c.id)),
-                  )
-                }
-              >
-                {selected.size === visibleConversations.length
-                  ? texts.messages.clearSelection
-                  : texts.messages.selectAll}
-              </button>
-
-              <div className="ml-auto flex items-center gap-2">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="rounded-full"
-                  onClick={() => {
-                    setSelecting(false);
-                    setSelected(new Set());
-                  }}
-                >
-                  {texts.messages.cancelSelection}
-                </Button>
-
-                {inboxTab === "archived" ? (
-                  <Button
-                    size="sm"
-                    className="rounded-full"
-                    disabled={selected.size === 0 || restoreSelected.isPending}
-                    onClick={() => restoreSelected.mutate()}
-                  >
-                    {texts.messages.restoreSelected(selected.size)}
-                  </Button>
-                ) : (
-                  <Button
-                    size="sm"
-                    variant="destructive"
-                    className="rounded-full"
-                    disabled={selected.size === 0 || hideSelected.isPending}
-                    onClick={() => setConfirmDelete(true)}
-                  >
-                    {texts.messages.deleteSelected(selected.size)}
-                  </Button>
-                )}
-              </div>
-            </div>
-          )}
-
           <ul className="flex-1 overflow-y-auto overscroll-contain">
             {visibleConversations.length === 0 ? (
               <li className="p-4 text-center text-sm text-muted-foreground">
-                {inboxTab === "archived"
-                  ? texts.messages.noArchived
-                  : texts.messages.noConversations}
+                {texts.messages.noConversations}
               </li>
             ) : (
               visibleConversations.map((c) => (
@@ -405,14 +261,7 @@ function Mensagens() {
                   key={c.id}
                   conversation={c}
                   isActive={c.id === (activeConversation?.id ?? "")}
-                  selecting={selecting}
-                  selected={selected.has(c.id)}
-                  onToggle={() => toggleSelected(c.id)}
                   onSelect={() => {
-                    if (selecting) {
-                      toggleSelected(c.id);
-                      return;
-                    }
                     setActiveId(c.id);
                     if (c.unread > 0) markAsRead.mutate(c.id);
                   }}
@@ -438,9 +287,7 @@ function Mensagens() {
           </ul>
         </div>
 
-        <div
-          className={`flex min-h-0 min-w-0 flex-col ${!activeConversation ? "hidden md:flex" : "flex"}`}
-        >
+        <div className={`flex min-h-0 flex-col ${!activeConversation ? "hidden md:flex" : "flex"}`}>
           {!activeConversation ? (
             <div className="flex h-full items-center justify-center">
               <p className="text-sm text-muted-foreground">{texts.messages.selectConversation}</p>
@@ -448,17 +295,6 @@ function Mensagens() {
           ) : (
             <>
               <ConversationHeader
-                action={
-                  selectingMessages ? undefined : (
-                    <button
-                      type="button"
-                      onClick={() => setSelectingMessages(true)}
-                      className="rounded-full px-3 py-1 text-xs font-normal text-text-subtle transition hover:bg-surface-2 hover:text-primary"
-                    >
-                      {texts.messages.selectMessages}
-                    </button>
-                  )
-                }
                 conversation={activeConversation}
                 onBack={() => setActiveId(null)}
               />
@@ -490,54 +326,31 @@ function Mensagens() {
                       return (
                         <div
                           key={m.id}
-                          onClick={() => {
-                            if (!selectingMessages) return;
-                            setSelectedMessages((current) => {
-                              const next = new Set(current);
-                              if (next.has(m.id)) next.delete(m.id);
-                              else next.add(m.id);
-                              return next;
-                            });
-                          }}
-                          className={`flex items-end gap-2 ${isMe ? "justify-end" : "justify-start"} ${
-                            selectingMessages ? "cursor-pointer" : ""
-                          }`}
+                          className={`flex items-end gap-2 ${isMe ? "justify-end" : "justify-start"}`}
                         >
                           {!isMe && (
                             <Link
                               to="/perfil/$username"
                               params={{ username: otherUser?.username ?? otherParticipantId ?? "" }}
                             >
-                              <span className="relative mb-1 inline-block">
-                                <UserAvatar
-                                  src={otherUser?.avatar}
-                                  alt={otherUser?.name}
-                                  className="h-7 w-7 shrink-0"
-                                />
-                                {/* No avatar, só o primeiro emblema: é enfeite da foto, não a
-                                    linha do nome — empilhar cinco ali viraria borrão. */}
-                                <UserBadges
-                                  badge={otherUser?.badge}
-                                  className="absolute -bottom-0.5 -right-0.5 h-3 w-3 ring-1 ring-card"
-                                />
-                              </span>
+                              <UserAvatar
+                                src={otherUser?.avatar}
+                                alt={otherUser?.name}
+                                className="h-7 w-7 shrink-0 mb-1"
+                              />
                             </Link>
                           )}
                           <div
-                            className={`min-w-0 max-w-[75%] rounded-2xl px-4 py-2.5 text-sm shadow-sm ${
+                            className={`max-w-[75%] rounded-2xl px-4 py-2.5 text-sm shadow-sm ${
                               isMe
                                 ? "rounded-br-md bg-primary text-primary-foreground"
                                 : "rounded-bl-md bg-card text-foreground"
-                            } ${selectedMessages.has(m.id) ? "ring-2 ring-destructive/70" : ""}`}
+                            }`}
                           >
-                            <RichText
-                              content={m.text}
-                              className="break-words"
-                              linkClassName="break-all underline underline-offset-2"
-                            />
+                            <p className="break-words">{m.text}</p>
 
                             <p
-                              className={`mt-1 text-xs ${isMe ? "text-primary-foreground/70" : "text-muted-foreground"}`}
+                              className={`mt-1 text-[10px] ${isMe ? "text-primary-foreground/70" : "text-muted-foreground"}`}
                             >
                               {formatTime(m.time)}
                             </p>
@@ -550,98 +363,34 @@ function Mensagens() {
                 </div>
               </div>
 
-              {selectingMessages ? (
-                <div className="flex flex-wrap items-center gap-2 border-t border-border bg-surface-2 p-3">
-                  <span className="text-xs font-normal text-text-subtle">
-                    {texts.messages.selectedMessages(selectedMessages.size)}
-                  </span>
+              <form
+                onSubmit={handleSubmit}
+                className="flex items-center gap-2 border-t border-border p-3"
+              >
+                <Input
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  placeholder={texts.messages.inputPlaceholder}
+                  className="h-10 rounded-full bg-muted"
+                />
 
-                  <div className="ml-auto flex items-center gap-2">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="rounded-full"
-                      onClick={() => {
-                        setSelectingMessages(false);
-                        setSelectedMessages(new Set());
-                      }}
-                    >
-                      {texts.messages.cancelSelection}
-                    </Button>
-
-                    <Button
-                      size="sm"
-                      variant="destructive"
-                      className="rounded-full"
-                      disabled={selectedMessages.size === 0 || hideMessages.isPending}
-                      onClick={() => hideMessages.mutate()}
-                    >
-                      {texts.messages.deleteSelectedMessages(selectedMessages.size)}
-                    </Button>
-                  </div>
-                </div>
-              ) : (
-                <form
-                  onSubmit={handleSubmit}
-                  className="flex items-end gap-2 border-t border-border p-3"
+                <button
+                  type="submit"
+                  disabled={!text.trim() || sendMessage.isPending}
+                  className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground transition hover:opacity-90 disabled:opacity-50"
                 >
-                  <textarea
-                    value={text}
-                    onChange={(e) => setText(e.target.value)}
-                    onKeyDown={(e) => {
-                      // Enter envia; Shift+Enter quebra linha (padrao de chat).
-                      if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-                        e.preventDefault();
-                        handleSubmit(e as unknown as React.FormEvent<HTMLFormElement>);
-                      }
-                    }}
-                    ref={messageInputRef}
-                    rows={1}
-                    placeholder={texts.messages.inputPlaceholder}
-                    className="max-h-32 min-h-[40px] w-full resize-none rounded-2xl bg-muted px-4 py-2.5 text-sm outline-none"
-                  />
-                  <EmojiPicker
-                    onPick={insertEmoji}
-                    buttonTitle={texts.posts.formatting.emoji}
-                    buttonClassName="grid h-10 w-10 shrink-0 place-items-center rounded-full text-text-subtle transition hover:bg-muted hover:text-foreground"
-                  />
-
-                  <button
-                    type="submit"
-                    disabled={!text.trim() || sendMessage.isPending}
-                    className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground transition hover:opacity-90 disabled:opacity-50"
-                  >
-                    <Send className="h-4 w-4" />
-                  </button>
-                </form>
-              )}
+                  <Send className="h-4 w-4" />
+                </button>
+              </form>
             </>
           )}
         </div>
       </div>
-
-      <ConfirmDialog
-        open={confirmDelete}
-        onOpenChange={setConfirmDelete}
-        title={texts.messages.deleteTitle}
-        description={texts.messages.deleteDescription}
-        confirmLabel={texts.messages.deleteConfirm}
-        destructive
-        pending={hideSelected.isPending}
-        onConfirm={() => hideSelected.mutate()}
-      />
     </AppContainer>
   );
 }
 
-function ConversationItem({
-  conversation,
-  isActive,
-  onSelect,
-  selecting,
-  selected,
-  onToggle,
-}: ConversationItemProps) {
+function ConversationItem({ conversation, isActive, onSelect }: ConversationItemProps) {
   const currentUserId = getCurrentUserId();
   const otherId = conversation.participantIds.find((id) => id !== currentUserId);
   const { data: otherUser } = useQuery({
@@ -657,32 +406,18 @@ function ConversationItem({
       <button
         onClick={onSelect}
         className={`flex w-full items-center gap-3 px-4 py-3 text-left transition ${
-          selected ? "bg-primary-soft" : isActive ? "bg-primary-soft" : "hover:bg-muted"
+          isActive ? "bg-primary-soft" : "hover:bg-muted"
         }`}
       >
-        {selecting && (
-          <span
-            aria-hidden
-            className={`grid h-5 w-5 shrink-0 place-items-center rounded-full border ${
-              selected ? "border-primary bg-primary text-primary-foreground" : "border-border-soft"
-            }`}
-          >
-            {selected ? "✓" : ""}
-          </span>
-        )}
         <Link to="/perfil/$username" params={{ username: otherUser?.username ?? otherId ?? "" }}>
           <UserAvatar src={otherUser?.avatar} alt={title} className="h-11 w-11 shrink-0" />
         </Link>
 
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between">
-            <span className="flex min-w-0 items-center gap-1.5">
-              <span className="truncate text-sm font-medium">{title}</span>
+            <span className="truncate text-sm font-medium">{title}</span>
 
-              <UserBadges badges={otherUser?.badges} badge={otherUser?.badge} />
-            </span>
-
-            <span className="text-xs text-muted-foreground shrink-0 ml-2">
+            <span className="text-[11px] text-muted-foreground shrink-0 ml-2">
               {conversation.time ? formatTime(conversation.time) : ""}
             </span>
           </div>
@@ -692,7 +427,7 @@ function ConversationItem({
               {conversation.lastMessage ?? ""}
             </p>
             {conversation.unread > 0 && (
-              <span className="grid h-5 min-w-5 shrink-0 place-items-center rounded-full bg-primary px-1.5 text-xs font-semibold text-primary-foreground">
+              <span className="grid h-5 min-w-5 shrink-0 place-items-center rounded-full bg-primary px-1.5 text-[10px] font-semibold text-primary-foreground">
                 {conversation.unread}
               </span>
             )}
@@ -703,7 +438,7 @@ function ConversationItem({
   );
 }
 
-function ConversationHeader({ conversation, onBack, action }: ConversationHeaderProps) {
+function ConversationHeader({ conversation, onBack }: ConversationHeaderProps) {
   const currentUserId = getCurrentUserId();
   const otherId = conversation.participantIds.find((id) => id !== currentUserId);
   const { data: otherUser } = useQuery({
@@ -730,18 +465,12 @@ function ConversationHeader({ conversation, onBack, action }: ConversationHeader
         </Link>
 
         <div className="min-w-0">
-          <span className="flex items-center gap-1.5">
-            <span className="truncate font-semibold">{title}</span>
-
-            <UserBadges badges={otherUser?.badges} badge={otherUser?.badge} />
-          </span>
+          <p className="truncate font-semibold">{title}</p>
           {otherUser?.headline && (
             <p className="truncate text-xs text-muted-foreground">{otherUser.headline}</p>
           )}
         </div>
       </div>
-
-      {action && <div className="ml-auto shrink-0">{action}</div>}
     </header>
   );
 }
